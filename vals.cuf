@@ -1,0 +1,374 @@
+module parameters
+        implicit none
+        !--------------constants------------------------ 
+        real*8, parameter :: E_CHARGE = 1.602176565d-19
+        real*8, parameter :: HBAR = 0.658211928d0
+        real*8, parameter :: PI = dacos(-1.d0)
+        complex*16, parameter :: CI = (0.d0,1.d0)
+        !----------------------------------------------- 
+
+        real*8, save :: dt, dt_out, time_intermediate
+        logical :: WBL_on, Ishizaki_trunc_on, Init_propagation
+        integer,save :: nsteps, number_nonzeros, dim_fockspace, dim_DVR, dimen_hierarchy
+        integer,save :: truncation_tier, number_mode, number_lead, number_el_state, sign_pm
+        integer,save :: number_pair, number_pair_hamil_l, number_pair_hamil_r, number_pair_wbl
+        integer,save :: number_1st_tier
+        integer, dimension(:,:), allocatable,save :: modes
+        integer, dimension(:),   allocatable,save :: nth_tier
+        integer, dimension(:,:), allocatable,save :: indices
+        integer, dimension(:,:), allocatable,save :: rho_nonzeros
+        integer, dimension(:,:), allocatable,save :: matrix_pair
+        integer, dimension(:,:), allocatable,save :: matrix_pair_hamil_l
+        integer, dimension(:,:), allocatable,save :: matrix_pair_hamil_r
+        integer, dimension(:,:), allocatable,save :: matrix_pair_wbl
+        real*8, dimension(:,:), allocatable,save :: hamil
+        complex*16, dimension(:,:), allocatable :: rho_0
+        complex*16, dimension(:),   allocatable :: matrix_gammas
+        complex*16, dimension(:),   allocatable :: matrix_values_pair
+        real*8, dimension(:,:,:,:), allocatable,save :: d_operators
+        real*8, dimension(:,:,:),   allocatable,save :: V_DVR
+        real*8, dimension(:),     allocatable,save :: V_DVR_2
+        real*8, dimension(:,:),     allocatable,save :: CAP_DVR
+        integer, dimension(:,:), allocatable,save :: N_hamil
+        integer, dimension(:), allocatable,save :: N_matrix
+
+        integer, save :: number_thermal_bath, number_Pade_poles_Bose
+        integer, save :: truncation_tier_Bose, number_index_Bose, N_hierarchy_Bose
+        integer, save :: count_plus_Bose, count_minus_Bose
+        integer, dimension(:,:), allocatable,save :: N_pm_Bose
+        integer, dimension(:,:), allocatable, save :: indices_Bose, index_first_tier_Bose
+        integer, dimension(:,:), allocatable, save :: index_plus_Bose, index_minus_Bose     
+        real*8,  dimension(:,:), allocatable, save :: V_DVR_Bose
+        real*8,  dimension(:),   allocatable, save :: K_trunc_Bose
+        complex*16, dimension(:), allocatable, save :: gammas_Bose, etas_Bose
+        complex*16, dimension(:), allocatable, save :: wc_sum_Bose
+        complex*16, dimension(:), allocatable, save :: cof_plus_Bose, cof_minus_Bose
+contains
+
+subroutine read_dimension()
+        implicit none
+        integer :: ierr, ipos
+        character(len=40) :: filename
+        character(len=200) :: str
+
+time_intermediate = 0.d0
+filename = 'simulation_info.txt'
+open(10,file=filename,status='old',action='read')
+        do 
+                read(10,'(a)',iostat=ierr) str
+                if (ierr /=0) exit
+                if (index(str,'number of leads') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_lead
+                elseif (index(str,'number of thermal baths') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_thermal_bath
+                elseif (index(str,'number of electronic states') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_el_state
+                elseif (index(str,'number of Bose Pade poles') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_Pade_poles_Bose
+                elseif (index(str,'number of Bose indices') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_index_Bose
+                elseif (index(str,'Sign pm') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) sign_pm
+                elseif (index(str,'dimension of fockspace') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) dim_fockspace
+                elseif (index(str,'Fermi truncation tier') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) truncation_tier
+                elseif (index(str,'Bose truncation tier') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) truncation_tier_Bose
+                elseif (index(str,'Bose hierarchy') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) N_hierarchy_Bose
+                elseif ( index(str, 'ishizaki truncation') /= 0 ) then
+                        ipos = scan(str, '=' )
+                        read(str(1+ipos:),*) Ishizaki_trunc_on
+                elseif (index(str,'wide band limit') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) WBL_on
+                elseif (index(str,'time step (dt,[fs])') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) dt
+                elseif ( index(str, 'time outout step (dt_out,[fs])') /= 0 ) then
+                        ipos = scan(str, '=' )
+                        read(str(1+ipos:),*) dt_out
+                elseif ( index(str, 'Initial propagation') /= 0 ) then
+                        ipos = scan(str, '=' )
+                        read(str(1+ipos:),*) Init_propagation
+                elseif ( index(str, 'time intermediate (dt,[fs])') /= 0 ) then
+                        ipos = scan(str, '=' )
+                        read(str(1+ipos:),*) time_intermediate
+                elseif (index(str,'number of time steps') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) nsteps
+                elseif (index(str,'number of DVR grid points') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) dim_DVR
+                elseif (index(str,'number of mode') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_mode
+                elseif (index(str,'number of hierarchy') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) dimen_hierarchy
+                elseif (index(str,'number of nonzero entries') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_nonzeros
+                elseif (index(str,'number_pair_hierarchy') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_pair
+                elseif (index(str,'number_pair_hamil_l') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_pair_hamil_l
+                elseif (index(str,'number_pair_hamil_r') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_pair_hamil_r
+                elseif (index(str,'number_pair_wbl') .ne. 0) then
+                        ipos=scan(str,'=')
+                        read(str(1+ipos:),*) number_pair_wbl
+                elseif ( index(str, 'count_plus_Bose') /= 0 ) then
+                        ipos = scan(str, '=' )
+                        read(str(1+ipos:),*) count_plus_Bose
+                elseif ( index(str, 'count_minus_Bose') /= 0 ) then
+                        ipos = scan(str, '=' )
+                        read(str(1+ipos:),*) count_minus_Bose
+                endif
+enddo
+close(10)
+end subroutine read_dimension
+
+subroutine read_data()
+        character(len=40) :: filename
+        character(len=200) :: str
+        integer  :: i, j, k, i_count, i_lead, i_elec, i_hierarchy
+        integer  :: i_hierarchy_Bose, i_index_Bose
+        integer, dimension(:), allocatable :: n_count
+
+allocate(indices_Bose(number_index_Bose,0:N_hierarchy_Bose))
+filename='index_info.txt'
+open(10,file=filename,status='old',action='read')
+        read(10,'(a)') str
+        do i_count = 1, number_mode 
+                read(10,*) i,( modes(i,j), j = 1,4 )
+        enddo
+
+        read(10,'(a)') str
+        do i_count = 1, dimen_hierarchy 
+                read(10,*) i, nth_tier(i), (indices(i,j), j = 1,truncation_tier )
+        enddo
+        read(10,'(a)') str
+        read(10,'(a)') str
+        do i_count = 0, N_hierarchy_Bose
+          read(10,*) i, ( indices_Bose(j,i_count), j = 1, number_index_Bose )
+        enddo
+        read(10,'(a)') str
+        do i_count = 1, number_index_Bose
+          read(10,*) index_first_tier_Bose(i_count,1), index_first_tier_Bose(i_count,2)
+        enddo
+close(10)
+
+number_1st_tier = 0
+filename='rho_nonzeros.txt'
+open(10,file=filename,status='old',action='read')
+        read(10,'(a)') str
+        do i_count = 1, number_nonzeros 
+                read(10,*) rho_nonzeros(i_count,1), rho_nonzeros(i_count,2), rho_nonzeros(i_count,3)
+                i_hierarchy = rho_nonzeros(i_count,1)
+                if ( nth_tier(i_hierarchy) < 2 ) number_1st_tier = number_1st_tier + 1
+        enddo
+close(10)
+
+filename='system_info.txt'
+open(10,file=filename,status='old',action='read')
+        read(10,'(a)') str
+        do i_count = 1, number_index_Bose
+                read(10,*) i, j, k, gammas_Bose(i_count), etas_Bose(i_count)
+        enddo
+
+        read(10,'(a)') str
+        do i_count = 1, number_thermal_bath
+                read(10,*) i, K_trunc_Bose(i_count)
+        enddo
+
+        do i = 1, number_el_state
+        read(10,'(a)') str
+             do j = 1, dim_fockspace
+                read(10,*) (d_operators(0,i,j,k), k = 1, dim_fockspace)
+             enddo
+        read(10,'(a)') str
+             do j = 1, dim_fockspace
+                read(10,*) (d_operators(1,i,j,k), k = 1, dim_fockspace)
+             enddo
+        enddo
+
+        read(10,'(a)') str
+        do j = 1, dim_DVR*dim_fockspace
+                read(10,*) (hamil(j,k), k = 1, dim_DVR*dim_fockspace)
+        enddo
+
+        read(10,'(a)') str
+        do j = 1, dim_DVR*dim_fockspace
+           read(10,*) (rho_0(j,k), k = 1, dim_DVR*dim_fockspace)
+        enddo
+
+        read(10,'(a)') str
+        do i = 1, dim_fockspace
+           read(10,*) (CAP_DVR(i,j), j = 1, dim_DVR)
+        enddo
+
+        do i = 1, number_lead
+           do j = 1, number_el_state
+           read(10,'(a)') str
+           read(10,*) (V_DVR(i,j,k), k = 1, dim_DVR)
+           enddo
+        enddo
+
+      do i = 1, number_thermal_bath
+        read(10,'(a)') str
+          read(10,*) (V_DVR_Bose(i,k), k = 1, dim_DVR*dim_fockspace)
+      enddo
+    
+close(10)
+
+         V_DVR_2 = 0.d0
+         if ( WBL_on ) then
+         do i_lead = 1, number_lead
+            do i_elec = 1, number_el_state 
+               do i = 1, dim_DVR
+                  V_DVR_2(i) = V_DVR_2(i)- pi/2.d0 * V_DVR(i_lead,i_elec,i)**2  
+               enddo
+            enddo
+         enddo
+         endif
+ 
+         open(10,file='matrix.txt')
+         read(10,'(a)') str
+         do i_count = 1, number_pair
+         read(10,*) ( matrix_pair(i_count,j), j = 1,6 )
+         enddo
+         close(10)
+         
+         open(10,file='matrix_hamil.txt')
+         read(10,'(a)') str
+         do i_count = 1, number_pair_hamil_l
+         read(10,*) ( matrix_pair_hamil_l(i_count,j), j = 1,4 )
+         enddo
+         read(10,'(a)') str
+         do i_count = 1, number_pair_hamil_r
+         read(10,*) ( matrix_pair_hamil_r(i_count,j), j = 1,4 )
+         enddo
+         close(10)
+        
+         if (WBL_on) then 
+         open(10,file='matrix_wbl.txt')
+         read(10,'(a)') str
+         do i_count = 1, number_pair_wbl
+         read(10,*) ( matrix_pair_wbl(i_count,j), j = 1,5 )
+         enddo
+         close(10)
+         endif
+         
+         open(10,file='matrix_value.txt')
+         read(10,'(a)') str
+         read(10,*) matrix_gammas
+         read(10,'(a)') str
+         read(10,*) matrix_values_pair
+         close(10)
+
+        allocate(n_count(number_nonzeros))
+        n_count = 0
+        do i_count = 1, number_pair_hamil_l
+           k = matrix_pair_hamil_l(i_count,1)
+           n_count(k) = n_count(k) + 1 
+        end do
+        N_hamil(0,1) = 0
+        do i_count = 1, number_nonzeros
+            N_hamil(i_count,1) = N_hamil(i_count-1,1) + n_count(i_count)
+        end do
+
+        n_count = 0
+        do i_count = 1, number_pair_hamil_r
+           k = matrix_pair_hamil_r(i_count,1)
+           n_count(k) = n_count(k) + 1 
+        end do
+        N_hamil(0,2) = 0
+        do i_count = 1, number_nonzeros
+            N_hamil(i_count,2) = N_hamil(i_count-1,2) + n_count(i_count)
+        end do
+
+        n_count = 0
+        do i_count = 1, number_pair
+           k = matrix_pair(i_count,1)
+           n_count(k) = n_count(k) + 1 
+        end do
+
+        N_matrix(0) = 0
+        do i_count = 1, number_nonzeros
+            N_matrix(i_count) = N_matrix(i_count-1) + n_count(i_count)
+        end do
+        if (allocated(n_count)) deallocate(n_count)
+
+        wc_sum_Bose = 0.d0
+        do i_hierarchy_Bose = 0, N_hierarchy_Bose 
+            do i_index_Bose = 1, number_index_Bose
+                wc_sum_Bose(i_hierarchy_Bose) = wc_sum_Bose(i_hierarchy_Bose) + &
+                        indices_Bose(i_index_Bose,i_hierarchy_Bose) * gammas_Bose(i_index_Bose)
+            enddo
+        enddo
+
+        open(10,file = 'matrix_thermal.txt')
+          read(10,*)
+          do i_count = 1, count_plus_Bose
+            read(10,*) ( index_plus_Bose(j,i_count), j = 1, 3 )
+            i_hierarchy_Bose = index_plus_Bose(1, i_count)
+            i_index_Bose = index_plus_Bose(3, i_count)
+            cof_plus_Bose(i_count)= - ci * dsqrt(indices_Bose(i_index_Bose, i_hierarchy_Bose)+1.d0)*&
+                                        dsqrt(cdabs(etas_Bose(i_index_Bose)))
+            !  i_bath:
+            index_plus_Bose(3,i_count)=ceiling( real(index_plus_Bose(3,i_count)) * number_thermal_bath / number_index_Bose )
+          end do
+          read(10,*)
+          do i_count = 1, count_minus_Bose
+            read(10,*) ( index_minus_Bose(j, i_count), j = 1, 3 )
+            i_hierarchy_Bose = index_minus_Bose(1, i_count)
+            i_index_Bose = index_minus_Bose(3, i_count)
+            cof_minus_Bose(i_count)= -ci * dsqrt(dble(indices_Bose(i_index_Bose, i_hierarchy_Bose)))*&
+                                 etas_Bose(i_index_Bose)/dsqrt(cdabs(etas_Bose(i_index_Bose)))
+            !  i_bath:
+            index_minus_Bose(3,i_count)=ceiling( real(index_minus_Bose(3,i_count)) * number_thermal_bath / number_index_Bose )
+          end do
+        close(10)
+
+
+        allocate(n_count(0:N_hierarchy_Bose))
+        n_count = 0
+        do i_count = 1, count_plus_Bose
+           k = index_plus_Bose(1,i_count)
+           n_count(k) = n_count(k) + 1 
+        end do
+        N_pm_Bose(-1,1) = 0
+        do i_count = 0, N_hierarchy_Bose
+            N_pm_Bose(i_count,1) = N_pm_Bose(i_count-1,1) + n_count(i_count)
+        end do
+
+        n_count = 0
+        do i_count = 1, count_minus_Bose
+           k = index_minus_Bose(1,i_count)
+           n_count(k) = n_count(k) + 1 
+        end do
+        N_pm_Bose(-1,2) = 0
+        do i_count = 0, N_hierarchy_Bose
+            N_pm_Bose(i_count,2) = N_pm_Bose(i_count-1,2) + n_count(i_count)
+        end do
+        if (allocated(n_count)) deallocate(n_count)
+
+    if (allocated(indices_Bose)         ) deallocate(indices_Bose)    
+end subroutine read_data
+
+end module parameters

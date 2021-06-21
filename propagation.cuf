@@ -1,0 +1,695 @@
+module propagation
+        use parameters
+        implicit none
+        real*8, device :: pi_d
+        complex*16, device :: ci_d
+        integer :: N_div
+        real*8, dimension(:,:), allocatable, device :: hamil_d
+        integer, dimension(:,:), allocatable, device :: rho_nonzeros_d
+        integer, dimension(:,:), allocatable, device :: matrix_pair_d
+        integer, dimension(:,:), allocatable, device :: matrix_pair_hamil_l_d
+        integer, dimension(:,:), allocatable, device :: matrix_pair_hamil_r_d
+        integer, dimension(:,:), allocatable, device :: matrix_pair_wbl_d
+        integer, dimension(:,:), allocatable, device :: N_hamil_d
+        integer, dimension(:), allocatable, device :: N_matrix_d
+        complex*16, dimension(:), allocatable, device  :: matrix_gammas_d
+        complex*16, dimension(:), allocatable, device  :: matrix_values_pair_d
+        real*8, dimension(:,:,:), allocatable, device :: V_DVR_d
+        real*8, dimension(:),     allocatable, device :: V_DVR_2_d
+        real*8, dimension(:,:),   allocatable, device :: CAP_DVR_d
+
+        integer, dimension(:,:), allocatable, device :: index_plus_Bose_d, index_minus_Bose_d    
+        complex*16, dimension(:), allocatable, device :: wc_sum_Bose_d
+        complex*16, dimension(:), allocatable, device :: cof_plus_Bose_d, cof_minus_Bose_d
+        real*8,  dimension(:),   allocatable, device :: K_trunc_Bose_d
+        real*8,  dimension(:,:), allocatable, device :: V_DVR_Bose_d
+        integer, dimension(:,:), allocatable, device :: N_pm_Bose_d
+contains
+
+attributes(global) subroutine ops_add(rho_a,rho_b)
+   implicit none
+     complex*16 :: rho_a(:,:,:), rho_b(:,:,:)
+     integer :: i, j, k
+     
+     i = (blockIdx%x-1) * blockDim%x + threadIdx%x
+     j = blockIdx%y
+     k = blockIdx%z 
+     if ( i <= size( rho_a, 1 ) ) rho_a(i,j,k) = rho_a(i,j,k) + rho_b(i,j,k)
+end subroutine ops_add
+
+attributes(global) subroutine ops_mul(rho_in,rho_out,s0)
+   implicit none
+     complex*16 :: rho_in(:,:,:), rho_out(:,:,:)
+     real*8,value :: s0
+     integer :: i, j, k
+     
+     i = (blockIdx%x-1) * blockDim%x + threadIdx%x
+     j = blockIdx%y
+     k = blockIdx%z 
+     if ( i <= size( rho_in, 1 ) ) rho_out(i,j,k) = s0 * rho_in(i,j,k)
+end subroutine ops_mul
+
+attributes(global) subroutine mul_hamil_l(rho_in,rho_out,N_site,N_fac,shift)
+   implicit none
+     complex*16 :: rho_in(:,:,:), rho_out(:,:,:)
+     integer, value :: N_site, N_fac, shift
+     integer :: i_block, k_block, i_elem, i_a, i_b, ni, nj
+     integer :: i, j,  tx, ty, i_site, j_site, k
+     real*8, shared :: Asub(N_site/N_fac,N_site/N_fac)
+     complex*16, shared :: Bsub(N_site/N_fac,N_site/N_fac)
+     complex*16 :: Cij
+
+     i_block = blockIdx%x
+     k_block = blockIdx%z 
+     j = ceiling( dble(blockIdx%y) / N_fac )
+     i = blockIdx%y - (j-1) * N_fac
+     tx = threadIdx%x
+     ty = threadIdx%y
+     i_site = (i-1) * N_site / N_fac + tx
+     j_site = (j-1) * N_site / N_fac + ty
+
+     do i_elem = N_hamil_d(i_block-1,1)+1, N_hamil_d(i_block,1)
+     Cij = 0.d0
+       i_a = matrix_pair_hamil_l_d(i_elem,1)
+       i_b = matrix_pair_hamil_l_d(i_elem,2)
+       ni = matrix_pair_hamil_l_d(i_elem,3)
+       nj = matrix_pair_hamil_l_d(i_elem,4)
+       Asub(tx,ty) = hamil_d((ni-1)*N_site+i_site,(nj-1)*N_site+ty+shift)
+       Bsub(tx,ty) = rho_in((i_b-1)*N_site+tx+shift,j_site,k_block)
+       call syncthreads()
+       do k = 1, N_site / N_fac
+         Cij = Cij + Asub(tx,k) * Bsub(k,ty)
+       end do
+     rho_out((i_a-1)*N_site+i_site,j_site,k_block) = rho_out((i_a-1)*N_site+i_site,j_site,k_block) - ci_d * Cij
+     enddo
+end subroutine mul_hamil_l
+
+attributes(global) subroutine mul_hamil_r(rho_in,rho_out,N_site,N_fac,shift)
+   implicit none
+     complex*16 :: rho_in(:,:,:), rho_out(:,:,:)
+     integer, value :: N_site, N_fac, shift
+     integer :: i_block, k_block, i_elem, i_a, i_b, ni, nj
+     integer :: i, j, tx, ty, i_site, j_site, k
+     real*8, shared :: Asub(N_site/N_fac,N_site/N_fac)
+     complex*16, shared :: Bsub(N_site/N_fac,N_site/N_fac)
+     complex*16 :: Cij
+
+     i_block = blockIdx%x
+     k_block = blockIdx%z 
+     j = ceiling( dble(blockIdx%y) / N_fac )
+     i = blockIdx%y - (j-1) * N_fac
+     tx = threadIdx%x
+     ty = threadIdx%y
+     i_site = (i-1) * N_site / N_fac + tx
+     j_site = (j-1) * N_site / N_fac + ty
+
+     do i_elem = N_hamil_d(i_block-1,2)+1, N_hamil_d(i_block,2)
+     Cij = 0.d0
+       i_a = matrix_pair_hamil_r_d(i_elem,1)
+       i_b = matrix_pair_hamil_r_d(i_elem,2)
+       ni = matrix_pair_hamil_r_d(i_elem,3)
+       nj = matrix_pair_hamil_r_d(i_elem,4)
+       Bsub(tx,ty) = rho_in((i_b-1)*N_site+i_site,ty+shift,k_block)
+       Asub(tx,ty) = hamil_d((ni-1)*N_site+tx+shift,(nj-1)*N_site+j_site)
+       call syncthreads()
+       do k = 1, N_site / N_fac
+         Cij = Cij + Bsub(tx,k) * Asub(k,ty)
+       end do
+     rho_out((i_a-1)*N_site+i_site,j_site,k_block) = rho_out((i_a-1)*N_site+i_site,j_site,k_block) + ci_d * Cij
+     enddo
+end subroutine mul_hamil_r
+
+attributes(global) subroutine mul_hierarchy(rho_in,rho_out,N_site)
+    implicit none
+      complex*16 :: rho_in(:,:,:), rho_out(:,:,:)
+      integer,value ::  N_site
+      integer :: i_block, k_block, i_elem, i_site, j_site, i_a, i_b, i_sym, i_leftright, i_lead, i_elec 
+      
+      i_block = blockIdx%x
+      k_block = blockIdx%z 
+      i_site = threadIdx%x
+      j_site = (blockIdx%y-1) * blockDim%y + threadIdx%y
+      if (j_site <= N_site) then
+        rho_out((i_block-1)*N_site+i_site,j_site,k_block) = rho_out((i_block-1)*N_site+i_site,j_site,k_block) + &
+                  (matrix_gammas_d(i_block)- wc_sum_Bose_d(k_block-1))* rho_in((i_block-1)*N_site+i_site,j_site,k_block) &
+                   + ( V_DVR_2_d(i_site)+V_DVR_2_d(j_site) ) * rho_in((i_block-1)*N_site+i_site,j_site,k_block) 
+        do i_elem = N_matrix_d(i_block-1)+1, N_matrix_d(i_block)
+           i_a = matrix_pair_d(i_elem,1)
+           i_b = matrix_pair_d(i_elem,2)
+           i_sym = matrix_pair_d(i_elem,3)
+           i_leftright = matrix_pair_d(i_elem,4)
+           i_lead = matrix_pair_d(i_elem,5)
+           i_elec = matrix_pair_d(i_elem,6)
+           if (i_sym == 0 .and. i_leftright == 0 ) then
+               rho_out((i_a-1)*N_site+i_site,j_site,k_block) = rho_out((i_a-1)*N_site+i_site,j_site,k_block) + &
+                  matrix_values_pair_d(i_elem) * V_DVR_d(i_lead,i_elec,i_site)*rho_in((i_b-1)*N_site+i_site,j_site,k_block)
+            else if (i_sym == 0 .and. i_leftright == 1 ) then
+               rho_out((i_a-1)*N_site+i_site,j_site,k_block) = rho_out((i_a-1)*N_site+i_site,j_site,k_block) + &
+                  matrix_values_pair_d(i_elem) * rho_in((i_b-1)*N_site+i_site,j_site,k_block) * V_DVR_d(i_lead,i_elec,j_site)
+            else if (i_sym == 1 .and. i_leftright == 0 ) then
+               rho_out((i_a-1)*N_site+i_site,j_site,k_block) = rho_out((i_a-1)*N_site+i_site,j_site,k_block) + &
+                  matrix_values_pair_d(i_elem) * V_DVR_d(i_lead,i_elec,i_site) * &
+                  conjg(rho_in((i_b-1)*N_site+j_site,i_site,k_block)) 
+            else if (i_sym == 1 .and. i_leftright == 1 ) then
+               rho_out((i_a-1)*N_site+i_site,j_site,k_block) = rho_out((i_a-1)*N_site+i_site,j_site,k_block) + &
+                  matrix_values_pair_d(i_elem)* conjg(rho_in((i_b-1)*N_site+j_site,i_site,k_block)) * &
+                  V_DVR_d(i_lead,i_elec,j_site)
+           endif
+        enddo
+     end if
+end subroutine mul_hierarchy
+
+attributes(global) subroutine ops_lindblad(rho_in,rho_out,N_site)
+   implicit none
+     complex*16 :: rho_in(:,:,:), rho_out(:,:,:)
+     integer,value :: N_site
+     integer :: i_block, k_block, ni, nj, i_site, j_site, i_dvr
+      
+      i_block = blockIdx%x
+      k_block = blockIdx%z
+      ni = rho_nonzeros_d(i_block,2)
+      nj = rho_nonzeros_d(i_block,3)
+      i_site = threadIdx%x
+      j_site = (blockIdx%y-1) * blockDim%y + threadIdx%y
+      if (i_site < N_site .and. j_site < N_site) then
+         rho_out((i_block-1)*N_site+i_site,j_site,k_block) = rho_out((i_block-1)*N_site+i_site,j_site,k_block) - &
+                      ( CAP_DVR_d(ni,i_site)+CAP_DVR_d(nj,j_site) ) * rho_in((i_block-1)*N_site+i_site,j_site,k_block) 
+      end if
+
+      if (i_site == N_site .and. j_site == N_site .and. ni == nj) then
+         do i_dvr = 1, N_site -1
+         rho_out(i_block*N_site,N_site,k_block) = rho_out(i_block*N_site,N_site,k_block) + &
+                 2.d0 * CAP_DVR_d(ni,i_dvr) * rho_in((i_block-1)*N_site+i_dvr,i_dvr,k_block)
+         enddo
+      endif
+end subroutine ops_lindblad
+
+attributes(global) subroutine mul_wbl(rho_in,rho_out,N_site, N_lead)
+    implicit none
+      complex*16 :: rho_in(:,:,:), rho_out(:,:,:)
+      integer,value ::  N_site, N_lead
+      integer :: i_elem, k_block, i_site, j_site, i_a, i_b, i_lead, i_elec, i_tier, i_sign
+      
+      i_elem = blockIdx%x
+      k_block = blockIdx%z
+      i_site = threadIdx%x
+      j_site = (blockIdx%y-1) * blockDim%y + threadIdx%y
+      if (j_site <= N_site) then
+         i_a = matrix_pair_wbl_d(i_elem,1)
+         i_b = matrix_pair_wbl_d(i_elem,2)
+         i_elec = matrix_pair_wbl_d(i_elem,3)
+         i_tier = matrix_pair_wbl_d(i_elem,4)
+         i_sign = matrix_pair_wbl_d(i_elem,5)
+         do i_lead = 1, N_lead
+         rho_out((i_a-1)*N_site+i_site,j_site,k_block) = rho_out((i_a-1)*N_site+i_site,j_site,k_block) - pi_d * i_sign * &
+                              V_DVR_d(i_lead,i_elec,i_site) * V_DVR_d(i_lead,i_elec,j_site) * &
+                              (-1.d0)**(i_tier+1) *rho_in((i_b-1)*N_site+i_site,j_site,k_block)
+         enddo
+     end if
+end subroutine mul_wbl
+
+attributes(global) subroutine mul_Vd_B_pm(rho_in, rho_out, N_site)
+   implicit none
+     complex*16 :: rho_in(:,:,:), rho_out(:,:,:)
+     integer,value :: N_site
+     integer :: i_block, k_block, i_hierarchy, i_elem, i_site, j_site, ni, nj, i_index, i_pm, i_bath
+     
+     i_block = blockIdx%x
+     k_block = blockIdx%z 
+     i_elem = (blockIdx%x-1) * blockDim%x + threadIdx%x
+     i_site = threadIdx%x
+     j_site = (blockIdx%y-1) * blockDim%y + threadIdx%y
+     if (j_site <= N_site) then
+        ni = rho_nonzeros_d(i_block,2)
+        nj = rho_nonzeros_d(i_block,3)
+        do i_index = N_pm_Bose_d(k_block-2, 1)+1, N_pm_Bose_d(k_block-1, 1)
+           i_hierarchy = index_plus_Bose_d(1, i_index) + 1
+           i_pm = index_plus_Bose_d(2, i_index) + 1
+           i_bath = index_plus_Bose_d(3, i_index)
+           rho_out(i_elem, j_site, i_hierarchy) = rho_out(i_elem, j_site, i_hierarchy) + cof_plus_Bose_d(i_index) &
+                                  * ( V_DVR_Bose_d(i_bath,(ni-1)*N_site+i_site)  - V_DVR_Bose_d(i_bath,(nj-1)*N_site+j_site) )&
+                                  * rho_in(i_elem, j_site, i_pm)
+        enddo
+        do i_index = N_pm_Bose_d(k_block-2, 2)+1, N_pm_Bose_d(k_block-1, 2)
+           i_hierarchy = index_minus_Bose_d(1, i_index) + 1
+           i_pm = index_minus_Bose_d(2, i_index) + 1
+           i_bath = index_minus_Bose_d(3, i_index)
+           rho_out(i_elem, j_site, i_hierarchy) = rho_out(i_elem, j_site, i_hierarchy) + rho_in(i_elem, j_site, i_pm)&
+                                      * ( cof_minus_Bose_d(i_index) * V_DVR_Bose_d(i_bath,(ni-1)*N_site+i_site) &
+                                          + conjg(cof_minus_Bose_d(i_index)) * V_DVR_Bose_d(i_bath,(nj-1)*N_site+j_site) )
+        enddo
+     end if
+end subroutine mul_Vd_B_pm
+
+attributes(global) subroutine mul_Vd_B_ishizaki_trunc(rho_in, rho_out, N_site, N_bath)
+   implicit none
+     complex*16 :: rho_in(:,:,:), rho_out(:,:,:)
+     integer,value :: N_site, N_bath
+     integer :: i_block, k_block, i_elem, i_site, j_site, ni, nj, i_bath
+     
+     i_block = blockIdx%x
+     k_block = blockIdx%z
+     i_elem = (blockIdx%x-1) * blockDim%x + threadIdx%x
+     i_site = threadIdx%x
+     j_site = (blockIdx%y-1) * blockDim%y + threadIdx%y
+     if (j_site <= N_site) then
+        ni = rho_nonzeros_d(i_block,2)
+        nj = rho_nonzeros_d(i_block,3)
+        do i_bath = 1, N_bath
+        rho_out(i_elem, j_site, k_block) = rho_out(i_elem, j_site, k_block)- K_trunc_Bose_d(i_bath) * &
+                             (V_DVR_Bose_d(i_bath,(ni-1)*N_site+i_site)**2 + V_DVR_Bose_d(i_bath,(nj-1)*N_site+j_site)**2 &
+                             - 2.d0 * V_DVR_Bose_d(i_bath,(ni-1)*N_site+i_site)* V_DVR_Bose_d(i_bath,(nj-1)*N_site+j_site)) *&
+                             rho_in(i_elem, j_site, k_block) 
+        enddo
+     end if
+end subroutine mul_Vd_B_ishizaki_trunc
+
+subroutine one_step_propagation(rho_io_expo)
+    use cudafor
+    implicit none
+        complex*16, intent(inout),dimension(number_nonzeros*dim_DVR,dim_DVR,0:N_hierarchy_Bose), device :: rho_io_expo
+        complex*16,dimension(number_nonzeros*dim_DVR,dim_DVR,0:N_hierarchy_Bose), device :: rho_in
+        complex*16,dimension(number_nonzeros*dim_DVR,dim_DVR,0:N_hierarchy_Bose), device :: drho
+        type(dim3) :: grid, tBlock
+        integer :: i_expo, shift
+        integer :: block_cols, grid_cols
+       
+        block_cols=floor(1024.d0/dble(dim_DVR)) 
+        grid_cols=ceiling(dble(dim_DVR)/dble(block_cols)) 
+
+        rho_in=rho_io_expo
+        do i_expo=1,4
+           drho=0.d0
+          
+           tBlock = dim3(dim_DVR/N_div, dim_DVR/N_div, 1)
+           grid = dim3(number_nonzeros, N_div**2,  N_hierarchy_Bose+1)
+           do shift = 0, dim_DVR-1, dim_DVR/N_div
+             call mul_hamil_l<<<grid,tBlock,(dim_DVR/N_div)**2*24>>>(rho_in,drho,dim_DVR,N_div,shift)
+             call mul_hamil_r<<<grid,tBlock,(dim_DVR/N_div)**2*24>>>(rho_in,drho,dim_DVR,N_div,shift)
+           end do
+
+           tBlock = dim3(dim_DVR, block_cols, 1)
+           grid = dim3(number_nonzeros, grid_cols, N_hierarchy_Bose+1)
+           call mul_hierarchy<<<grid,tBlock>>>(rho_in, drho, dim_DVR)
+           call ops_lindblad<<<grid,tBlock>>>(rho_in,drho,dim_DVR)
+           call mul_Vd_B_pm<<<grid,tBlock>>>(rho_in,drho,dim_DVR)
+
+           if (WBL_on) then
+           tBlock = dim3(dim_DVR, block_cols, 1)
+           grid = dim3(number_pair_wbl, grid_cols, N_hierarchy_Bose+1)
+           call mul_wbl<<<grid,tBlock>>>(rho_in, drho, dim_DVR, number_lead)
+           endif
+
+           if ( Ishizaki_trunc_on ) then
+           tBlock = dim3(dim_DVR, block_cols, 1)
+           grid = dim3(number_nonzeros, grid_cols, N_hierarchy_Bose+1)
+           call mul_Vd_B_ishizaki_trunc<<<grid,tBlock>>>(rho_in,drho,dim_DVR,number_thermal_bath)
+           endif
+
+           tBlock = dim3(1024,1,1)
+           grid = dim3(ceiling( dble(number_nonzeros*dim_DVR)/1024 ), dim_DVR, N_hierarchy_Bose+1)
+           call ops_mul<<<grid,tBlock>>>(drho,rho_in,dt/hbar/dble(i_expo))
+           call ops_add<<<grid,tBlock>>>(rho_io_expo,rho_in)
+        enddo !i_expo
+end subroutine        
+
+end module propagation
+
+program main
+        use parameters
+        use propagation
+        use cudafor
+        implicit none
+        complex*16, dimension(:,:,:),allocatable :: rho
+        complex*16, dimension(:,:,:),allocatable, device :: rho_d
+        complex*16, dimension(:,:),allocatable  :: rho_output
+        complex*16, dimension(:),allocatable  :: rho_output_el
+        real*8, dimension(:), allocatable :: current
+        integer :: istat
+        type(cudaEvent) :: startEvent, nowEvent
+        integer :: i,j
+        integer :: i_mode, i_lead, i_elec, i_sign
+        integer :: i_elem, ni, nj, nk, i_hierarchy, i_tier, i_dvr
+        integer :: i_hierarchy_Bose, i_index_Bose, i_bath_Bose, i_hierarchy_1st_Bose
+        real*8 :: t_start, t_now
+        integer :: t_hour, t_minute, t_second
+        real*8 :: interval
+        integer :: grid_1, grid_2
+        real*8, dimension(:), allocatable :: heat_current
+        character(len=100) :: progress_1
+        character(len=100) :: progress_2
+        character(len=32) :: output_fmt
+
+        pi_d = pi
+        ci_d = ci
+call read_dimension()
+allocate(modes(0:number_mode-1,4))
+allocate(nth_tier(0:dimen_hierarchy-1)) 
+allocate(indices(0:dimen_hierarchy-1,truncation_tier)) 
+allocate(rho_nonzeros(number_nonzeros,3)) 
+allocate(hamil(dim_fockspace*dim_DVR,dim_fockspace*dim_DVR))  
+allocate(rho_0(dim_fockspace*dim_DVR,dim_fockspace*dim_DVR)) 
+allocate(d_operators(0:1,number_el_state,dim_fockspace,dim_fockspace))
+allocate(V_DVR(number_lead,number_el_state,dim_DVR))
+allocate(CAP_DVR(dim_fockspace,dim_DVR)) 
+allocate(V_DVR_2(dim_DVR))
+allocate(matrix_pair(number_pair,6))  
+allocate(matrix_pair_hamil_l(number_pair_hamil_l,4))  
+allocate(matrix_pair_hamil_r(number_pair_hamil_r,4))  
+allocate(matrix_gammas(number_nonzeros))  
+allocate(matrix_values_pair(number_pair))  
+if (WBL_on) then
+allocate(matrix_pair_wbl(number_pair_wbl,5))  
+endif
+allocate(current(number_lead))  
+allocate(rho_output(dim_fockspace*dim_DVR,dim_fockspace*dim_DVR)) 
+allocate(rho_output_el(dim_fockspace)) 
+allocate(N_hamil(0:number_nonzeros,2))
+allocate(N_matrix(0:number_nonzeros))
+
+allocate(etas_Bose(number_index_Bose)) 
+allocate(gammas_Bose(number_index_Bose)) 
+allocate(wc_sum_Bose(0:N_hierarchy_Bose))
+allocate(cof_plus_Bose(count_plus_Bose))
+allocate(cof_minus_Bose(count_minus_Bose))
+allocate(K_trunc_Bose(number_thermal_bath))
+allocate(V_DVR_Bose(number_thermal_bath,dim_fockspace*dim_DVR))
+allocate(index_plus_Bose(3,count_plus_Bose))      
+allocate(index_minus_Bose(3,count_minus_Bose))      
+allocate(index_first_tier_Bose(number_index_Bose,2))    
+allocate(N_pm_Bose(-1:N_hierarchy_Bose,2))
+allocate(heat_current(dim_fockspace))
+
+call read_data()
+
+allocate(rho_nonzeros_d(number_nonzeros,3)) 
+allocate(hamil_d(dim_fockspace*dim_DVR,dim_fockspace*dim_DVR))  
+allocate(V_DVR_d(number_lead,number_el_state,dim_DVR))
+allocate(CAP_DVR_d(dim_fockspace,dim_DVR)) 
+allocate(V_DVR_2_d(dim_DVR))
+allocate(matrix_pair_d(number_pair,6))  
+allocate(matrix_pair_hamil_l_d(number_pair_hamil_l,4))  
+allocate(matrix_pair_hamil_r_d(number_pair_hamil_r,4))  
+if (WBL_on) then
+allocate(matrix_pair_wbl_d(number_pair_wbl,5))  
+endif
+allocate(matrix_gammas_d(number_nonzeros))  
+allocate(matrix_values_pair_d(number_pair))  
+allocate(N_hamil_d(0:number_nonzeros,2))
+allocate(N_matrix_d(0:number_nonzeros))
+allocate(rho_d(number_nonzeros*dim_DVR,dim_DVR,0:N_hierarchy_Bose)) 
+
+allocate(wc_sum_Bose_d(0:N_hierarchy_Bose))
+allocate(cof_plus_Bose_d(count_plus_Bose))
+allocate(cof_minus_Bose_d(count_minus_Bose))
+allocate(K_trunc_Bose_d(number_thermal_bath))
+allocate(V_DVR_Bose_d(number_thermal_bath,dim_fockspace*dim_DVR))
+allocate(index_plus_Bose_d(3,count_plus_Bose))      
+allocate(index_minus_Bose_d(3,count_minus_Bose))      
+allocate(N_pm_Bose_d(-1:N_hierarchy_Bose,2))
+
+rho_nonzeros_d = rho_nonzeros
+hamil_d = hamil
+V_DVR_d = V_DVR
+CAP_DVR_d = CAP_DVR
+V_DVR_2_d = V_DVR_2
+matrix_pair_d = matrix_pair
+matrix_pair_hamil_l_d = matrix_pair_hamil_l
+matrix_pair_hamil_r_d = matrix_pair_hamil_r
+if (WBL_on) then
+matrix_pair_wbl_d = matrix_pair_wbl
+endif
+matrix_gammas_d = matrix_gammas
+matrix_values_pair_d = matrix_values_pair
+N_hamil_d = N_hamil
+N_matrix_d = N_matrix
+N_pm_Bose_d = N_pm_Bose
+wc_sum_Bose_d = wc_sum_Bose
+cof_plus_Bose_d = cof_plus_Bose
+cof_minus_Bose_d = cof_minus_Bose
+K_trunc_Bose_d = K_trunc_Bose
+V_DVR_Bose_d = V_DVR_Bose
+index_plus_Bose_d = index_plus_Bose
+index_minus_Bose_d = index_minus_Bose
+
+N_div=ceiling(dble(dim_DVR)/32)
+do while (mod(dim_DVR,N_div) /= 0); N_div=N_div+1; enddo
+
+        if (nsteps<100) then 
+        interval=1.0
+        else
+        interval=nsteps/100
+        endif
+write(progress_1,'(a)') '****************************************************************************************************'
+write(progress_2,'(a)') '----------------------------------------------------------------------------------------------------'
+write(output_fmt,'(a,i0,a)') '(e20.10,',dim_DVR**2,'e20.10)'
+
+allocate(rho(number_nonzeros*dim_DVR,dim_DVR,0:N_hierarchy_Bose)) 
+       rho=0.0
+       if (Init_propagation) then
+        open(201,file='rho_gs_real.data', status='new', action='write')
+        open(301,file='rho_gs_imag.data', status='new', action='write')
+        open(401,file='rho_es_real.data', status='new', action='write')
+        open(501,file='rho_es_imag.data', status='new', action='write')
+        open(601,file='current.data', status='new', action='write')
+        open(602,file='heat_current.data', status='new', action='write')
+        open(603,file='dissociation_probability.data', status='new', action='write')
+        open(604,file='rho_el.data', status='new', action='write')
+
+        current=0.0
+        do i_elem = 1,number_nonzeros
+           i_hierarchy = rho_nonzeros(i_elem,1)
+           ni = rho_nonzeros(i_elem,2)
+           nj = rho_nonzeros(i_elem,3)
+           i_tier = nth_tier(i_hierarchy)
+           if (i_tier == 0) then
+                rho((i_elem-1)*dim_DVR+1:i_elem*dim_DVR,:,0) = rho_0((ni-1)*dim_DVR+1:ni*dim_DVR,(nj-1)*dim_DVR+1:nj*dim_DVR)
+                if (WBL_on) then
+                   do i_lead = 1, number_lead
+                      do i_elec=1,number_el_state
+                         i_sign = 0
+                         do nk = 1, dim_fockspace
+                         i_sign = i_sign + d_operators(1, i_elec, nj, nk) *d_operators(0, i_elec, nk, ni) &
+                                  -d_operators(0, i_elec, nj, nk) *d_operators(1, i_elec, nk, ni) 
+                         enddo
+                         do i_dvr =1, dim_DVR
+                         current(i_lead) = current(i_lead) + pi*e_charge/(hbar*1e-15) * i_sign * &
+                               V_DVR(i_lead,i_elec,i_dvr)**2 * dreal( rho((i_elem-1)*dim_DVR+i_dvr,i_dvr,0) ) 
+                         enddo
+                      enddo
+                   enddo
+                endif
+           else if (i_tier == 1) then
+                i_mode = indices(i_hierarchy, 1)
+                i_lead = modes(i_mode, 1) + 1
+                i_elec = modes(i_mode, 2) + 1
+                i_sign = 1 - modes(i_mode, 4) 
+                do i_dvr =1, dim_DVR
+                current(i_lead) = current(i_lead) + e_charge/(hbar*1e-15) *(-1)**i_sign * d_operators(i_sign, i_elec, nj, ni) * &
+                            V_DVR(i_lead,i_elec,i_dvr) * dimag( rho((i_elem-1)*dim_DVR+i_dvr,i_dvr,0) ) * 2.d0 
+                enddo
+           else if ( i_tier > 1 ) then
+               exit
+           endif
+        enddo
+        write(201,output_fmt) 0.0,((dreal(rho_0(grid_1,grid_2)),grid_2=1,dim_DVR),grid_1=1,dim_DVR)
+        write(301,output_fmt) 0.0,((dimag(rho_0(grid_1,grid_2)),grid_2=1,dim_DVR),grid_1=1,dim_DVR)
+        write(401,output_fmt) 0.0,((dreal(rho_0(dim_DVR+grid_1,dim_DVR+grid_2)),grid_2=1,dim_DVR),grid_1=1,dim_DVR)
+        write(501,output_fmt) 0.0,((dimag(rho_0(dim_DVR+grid_1,dim_DVR+grid_2)),grid_2=1,dim_DVR),grid_1=1,dim_DVR)
+        if (allocated(rho_0)) deallocate(rho_0) 
+        write(601,*) 0.0,current(1),current(2)
+
+      else
+        open(201,file='rho_gs_real.data', status='old', position='append',action='write')
+        open(301,file='rho_gs_imag.data', status='old', position='append',action='write')
+        open(401,file='rho_es_real.data', status='old', position='append',action='write')
+        open(501,file='rho_es_imag.data', status='old', position='append',action='write')
+        open(601,file='current.data', status='old', position='append',action='write')
+        open(602,file='heat_current.data', status='old', position='append',action='write')
+        open(603,file='dissociation_probability.data', status='old', position='append',action='write')
+        open(604,file='rho_el.data', status='old', position='append',action='write')
+
+        open(701,file="rho.bin",form="unformatted",access="direct",recl=number_nonzeros*dim_DVR**2*16)
+        do i = 0, N_hierarchy_Bose
+        read(701,rec=i+1) rho(:,:,i)
+        enddo
+        close(701)
+      endif
+
+        rho_d = rho
+if (allocated(rho)               ) deallocate(rho) 
+allocate(rho(number_1st_tier*dim_DVR,dim_DVR,0:N_hierarchy_Bose)) 
+        call CPU_TIME(t_start)
+        do i = 1, nsteps
+        if (mod(i,int(interval))==0) then
+        call CPU_TIME(t_now)
+        t_hour = int((t_now-t_start)/3600)
+        t_minute = mod(int(t_now-t_start),3600)/60
+        t_second = mod(int(t_now-t_start),60)
+        open(100,file='progression.txt',status='REPLACE')
+        write(100,'(a,i3,a,i0,a,i2,a,i2)')"|"//progress_1(1:int(i/interval))//progress_2(int(i/interval)+1:100)//"|",&
+                            100*i/nsteps,"%, use time ",t_hour,":",t_minute,":",t_second 
+        close(100)
+        endif
+        call one_step_propagation(rho_d)
+
+        if ( mod(i,int(dt_out/dt))==0) then
+          rho = rho_d(1:number_1st_tier*dim_DVR,:,:)
+          current = 0.d0
+          rho_output = 0.d0
+          do i_elem = 1,number_1st_tier
+             i_hierarchy = rho_nonzeros(i_elem,1)
+             ni = rho_nonzeros(i_elem,2)
+             nj = rho_nonzeros(i_elem,3)
+             i_tier = nth_tier(i_hierarchy)
+             if (i_tier == 0) then
+             rho_output((ni-1)*dim_DVR+1:ni*dim_DVR,(nj-1)*dim_DVR+1:nj*dim_DVR) = rho((i_elem-1)*dim_DVR+1:i_elem*dim_DVR,:,0)
+                if (WBL_on) then
+                   do i_lead = 1, number_lead
+                      do i_elec = 1, number_el_state
+                         i_sign = 0
+                         do nk = 1, dim_fockspace
+                         i_sign = i_sign + d_operators(1, i_elec, nj, nk) *d_operators(0, i_elec, nk, ni) &
+                                  -d_operators(0, i_elec, nj, nk) *d_operators(1, i_elec, nk, ni) 
+                         enddo
+                         do i_dvr =1, dim_DVR
+                         current(i_lead) = current(i_lead) + pi*e_charge/(hbar*1e-15) * i_sign * &
+                               V_DVR(i_lead,i_elec,i_dvr)**2 * dreal( rho((i_elem-1)*dim_DVR+i_dvr,i_dvr,0) ) 
+                         enddo
+                      enddo
+                   enddo
+                endif
+             else if (i_tier == 1) then
+                i_mode = indices(i_hierarchy, 1)
+                i_lead = modes(i_mode, 1) + 1
+                i_elec = modes(i_mode, 2) + 1
+                i_sign = 1 - modes(i_mode, 4) 
+                do i_dvr =1, dim_DVR
+                current(i_lead) = current(i_lead) + e_charge/(hbar*1e-15) *(-1)**i_sign * d_operators(i_sign, i_elec, nj, ni) * &
+                            V_DVR(i_lead,i_elec,i_dvr) * dimag( rho((i_elem-1)*dim_DVR+i_dvr,i_dvr,0) ) * 2.d0 
+                enddo
+             endif
+          enddo
+          rho_output_el = 0.d0
+          do i_elec = 1, dim_fockspace
+          do i_dvr = 1, dim_DVR
+          rho_output_el(i_elec) = rho_output_el(i_elec)+rho_output((i_elec-1)*dim_DVR+i_dvr,(i_elec-1)*dim_DVR+i_dvr)
+          enddo
+          enddo
+          write(604,*) dt*i+time_intermediate, (dreal(rho_output_el(i_elec)), i_elec = 1, dim_fockspace)
+          write(201,output_fmt) dt*i+time_intermediate,((dreal(rho_output(grid_1,grid_2)),grid_2=1,dim_DVR),grid_1=1,dim_DVR)
+          write(301,output_fmt) dt*i+time_intermediate,((dimag(rho_output(grid_1,grid_2)),grid_2=1,dim_DVR),grid_1=1,dim_DVR)
+          write(401,output_fmt) dt*i+time_intermediate,((dreal(rho_output(dim_DVR+grid_1,dim_DVR+grid_2)),&
+                                                              grid_2=1,dim_DVR),grid_1=1,dim_DVR)
+          write(501,output_fmt) dt*i+time_intermediate,((dimag(rho_output(dim_DVR+grid_1,dim_DVR+grid_2)),&
+                                                              grid_2=1,dim_DVR),grid_1=1,dim_DVR)
+          write(601,*) dt*i+time_intermediate, current(1), current(2)
+          write(603,'(f15.7,4(e20.10))') dt*i+time_intermediate, dreal(rho_output(dim_DVR,dim_DVR)), dreal(rho_output(2*dim_DVR,2*dim_DVR))
+
+
+          heat_current = 0.0
+          do i_elem = 1,number_1st_tier
+             i_hierarchy = rho_nonzeros(i_elem,1)
+             ni = rho_nonzeros(i_elem,2)
+             nj = rho_nonzeros(i_elem,3)
+             i_tier = nth_tier(i_hierarchy)
+             if (i_tier == 0 .and. ni==nj) then
+             do i_hierarchy_1st_Bose = 1, number_index_Bose 
+                i_hierarchy_Bose = index_first_tier_Bose(i_hierarchy_1st_Bose,1)
+                i_index_Bose = index_first_tier_Bose(i_hierarchy_1st_Bose,2)
+                i_bath_Bose =ceiling( dble (i_index_Bose)/ (number_Pade_poles_Bose+1))
+                   do i_dvr=1,dim_DVR
+                   heat_current(ni) = heat_current(ni)-V_DVR_Bose(i_bath_Bose,(ni-1)*dim_DVR+i_dvr)* &
+                               dsqrt(cdabs(etas_Bose(i_index_Bose)))*dreal( gammas_Bose(i_index_Bose)*&
+                               rho((ni-1)*dim_DVR+i_dvr,i_dvr,i_hierarchy_Bose) )
+                  !heat_current(ni)=heat_current(ni)-gammas_Bose(i_index_Bose)*V_DVR_Bose(i_bath_Bose,(ni-1)*dim_DVR+i_dvr)*&
+                  !            dsqrt(cdabs(etas_Bose(i_index_Bose)))*&
+                  !            rho((ni-1)*dim_DVR+i_dvr,i_dvr,i_hierarchy_Bose) 
+                   enddo
+            enddo
+            endif
+          enddo
+          write(602,'(f15.7,4(e20.10))') dt*i+time_intermediate,(heat_current(i_elec),i_elec=1,dim_fockspace)
+
+        endif
+
+        enddo
+
+        close(201)
+        close(301)
+        close(401)
+        close(501)
+        close(601)
+        close(602)
+        close(603)
+        close(604)
+if (allocated(rho)               ) deallocate(rho) 
+allocate(rho(number_nonzeros*dim_DVR,dim_DVR,0:N_hierarchy_Bose)) 
+      rho = rho_d
+      open(701,file="rho.bin",form="unformatted",access="direct",recl=number_nonzeros*dim_DVR**2*16)
+      do i = 0, N_hierarchy_Bose
+      write(701,rec=i+1) rho(:,:,i)
+      enddo
+      close(701)
+if (allocated(rho)               ) deallocate(rho) 
+
+if (allocated(rho_nonzeros_d)      ) deallocate(rho_nonzeros_d) 
+if (allocated(hamil_d)             ) deallocate(hamil_d)  
+if (allocated(CAP_DVR_d)           ) deallocate(CAP_DVR_d) 
+if (allocated(V_DVR_d)             ) deallocate(V_DVR_d)
+if (allocated(V_DVR_2_d)           ) deallocate(V_DVR_2_d)
+if (allocated(matrix_pair_d)       ) deallocate(matrix_pair_d)
+if (allocated(matrix_pair_hamil_l_d) ) deallocate(matrix_pair_hamil_l_d)
+if (allocated(matrix_pair_hamil_r_d) ) deallocate(matrix_pair_hamil_r_d)
+if (allocated(matrix_pair_wbl_d)   ) deallocate(matrix_pair_wbl_d)
+if (allocated(matrix_gammas_d)     ) deallocate(matrix_gammas_d)
+if (allocated(matrix_values_pair_d)) deallocate(matrix_values_pair_d)
+if (allocated(N_hamil_d)           ) deallocate(N_hamil_d)  
+if (allocated(N_matrix_d)          ) deallocate(N_matrix_d)  
+if (allocated(N_pm_Bose_d)          ) deallocate(N_pm_Bose_d)  
+if (allocated(rho_d)               ) deallocate(rho_d) 
+
+if (allocated(rho_output)        ) deallocate(rho_output) 
+if (allocated(rho_output_el)     ) deallocate(rho_output_el) 
+if (allocated(modes)             ) deallocate(modes)
+if (allocated(indices)           ) deallocate(indices) 
+if (allocated(nth_tier)          ) deallocate(nth_tier) 
+if (allocated(rho_nonzeros)      ) deallocate(rho_nonzeros) 
+if (allocated(hamil)             ) deallocate(hamil)  
+if (allocated(CAP_DVR)           ) deallocate(CAP_DVR) 
+if (allocated(d_operators)       ) deallocate(d_operators)
+if (allocated(V_DVR)             ) deallocate(V_DVR)
+if (allocated(V_DVR_2)           ) deallocate(V_DVR_2)
+if (allocated(matrix_pair)       ) deallocate(matrix_pair)
+if (allocated(matrix_pair_hamil_l) ) deallocate(matrix_pair_hamil_l)
+if (allocated(matrix_pair_hamil_r) ) deallocate(matrix_pair_hamil_r)
+if (allocated(matrix_pair_wbl)   ) deallocate(matrix_pair_wbl)
+if (allocated(matrix_gammas)     ) deallocate(matrix_gammas)
+if (allocated(matrix_values_pair)) deallocate(matrix_values_pair)
+if (allocated(N_hamil)           ) deallocate(N_hamil)  
+if (allocated(N_matrix)          ) deallocate(N_matrix)  
+if (allocated(N_pm_Bose)          ) deallocate(N_pm_Bose)  
+if (allocated(current)           ) deallocate(current)  
+
+
+if (allocated(wc_sum_Bose_d)        ) deallocate(wc_sum_Bose_d)
+if (allocated(cof_plus_Bose_d)     ) deallocate(cof_plus_Bose_d)
+if (allocated(cof_minus_Bose_d)     ) deallocate(cof_minus_Bose_d)
+if (allocated(K_trunc_Bose_d)       ) deallocate(K_trunc_Bose_d)
+if (allocated(V_DVR_Bose_d)            ) deallocate(V_DVR_Bose_d)
+if (allocated(index_plus_Bose_d)    ) deallocate(index_plus_Bose_d)    
+if (allocated(index_minus_Bose_d)   ) deallocate(index_minus_Bose_d)    
+if (allocated(wc_sum_Bose)          ) deallocate(wc_sum_Bose)
+if (allocated(K_trunc_Bose)         ) deallocate(K_trunc_Bose)
+if (allocated(V_DVR_Bose)              ) deallocate(V_DVR_Bose)
+if (allocated(cof_plus_Bose)       ) deallocate(cof_plus_Bose)
+if (allocated(cof_minus_Bose)       ) deallocate(cof_minus_Bose)
+if (allocated(index_plus_Bose)      ) deallocate(index_plus_Bose)    
+if (allocated(index_minus_Bose)     ) deallocate(index_minus_Bose)    
+if (allocated(index_first_tier_Bose)) deallocate(index_first_tier_Bose)    
+if (allocated(etas_Bose)            ) deallocate(etas_Bose)
+if (allocated(gammas_Bose)          ) deallocate(gammas_Bose)    
+if (allocated(heat_current)         ) deallocate(heat_current)
+
+end 
+

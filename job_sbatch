@@ -1,0 +1,17 @@
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=1 
+#SBATCH --gres=gpu:1
+#SBATCH --time=24:00:00
+#SBATCH --mem=12GB
+#SBATCH --export=ALL
+#SBATCH --job-name=test
+
+export KMP_AFFINITY=compact,1,0
+export PYTHONPATH=/home/yaling/anaconda3/lib/python3.7/site-packages/:$PYTHONPATH
+
+export OMP_NUM_THREADS=$((${SLURM_JOB_CPUS_PER_NODE}))
+echo "running on ${SLURM_JOB_CPUS_PER_NODE} cores with ${OMP_NUM_THREADS} threads"
+cd $SLURM_SUBMIT_DIR
+./propagation
+#./a.out

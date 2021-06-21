@@ -1,0 +1,15 @@
+#PBS -S/bin/bash
+#PBS -l nodes=1:ppn=1:gpus=1
+#PBS -l walltime=80:00:00
+#PBS -l mem=12gb
+#PBS -N hybrid
+#PBS -k oe
+#MSUB -m bea
+#MSUB -M yaling.ke@physik.uni-freiburg.de
+#PBS -q gpu
+export PATH="/home/fr/fr_fr/fr_yk1009/anaconda3/bin:$PATH"
+export PYTHONPATH="/home/fr/fr_fr/fr_yk1009/anaconda3/lib/python3.7/site-packages/:$PYTHONPATH"
+module load devel/cuda/10.1
+
+cd $PBS_O_WORKDIR
+./propagation
